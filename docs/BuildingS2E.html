@@ -3,7 +3,7 @@
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
-<meta name="generator" content="Docutils 0.8.1: http://docutils.sourceforge.net/" />
+<meta name="generator" content="Docutils 0.11: http://docutils.sourceforge.net/" />
 <title>Building the S2E Platform</title>
 <link rel="stylesheet" href="./s2e.css" type="text/css" />
 </head>
@@ -30,18 +30,20 @@ $ sudo apt-get install build-essential
 $ sudo apt-get install subversion
 $ sudo apt-get install git
 $ sudo apt-get install gettext
-$ sudo apt-get install liblua5.1-dev
+$ sudo apt-get install liblua5.1-0-dev
 $ sudo apt-get install libsdl1.2-dev
 $ sudo apt-get install libsigc++-2.0-dev
 $ sudo apt-get install binutils-dev
 $ sudo apt-get install python-docutils
 $ sudo apt-get install python-pygments
 $ sudo apt-get install nasm
+$ sudo apt-get install libiberty-dev
+$ sudo apt-get install libc6-dev-i386
 </pre>
 <p>The following commands ask <tt class="docutils literal"><span class="pre">apt-get</span></tt> to install build dependencies for llvm-3.0
 and qemu.</p>
 <pre class="literal-block">
-$ sudo apt-get build-dep llvm-3.0
+$ sudo apt-get build-dep llvm-3.3
 $ sudo apt-get build-dep qemu
 </pre>
 </div>

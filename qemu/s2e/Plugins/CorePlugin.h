@@ -42,6 +42,7 @@
 #include <s2e/Signals/Signals.h>
 #include <vector>
 #include <inttypes.h>
+#include <cpu.h>
 #include <s2e/s2e_qemu.h>
 
 extern "C" {
@@ -254,7 +255,10 @@ public:
             onDeviceActivation;
 
     sigc::signal<void, S2EExecutionState *,
-                 void *> /* PCIDevice * */
+                 void * /* PCIDevice * */,
+                 int /* bar_index */,
+                 uint64_t /* old_addr */
+                 >
             onPciDeviceMappingUpdate;
 
     /**

@@ -82,6 +82,10 @@ void MemoryTracer::initialize()
     //This is useful for debugging, bug yields larger traces
     m_traceHostAddresses = s2e()->getConfig()->getBool(getConfigKey() + ".traceHostAddresses");
 
+    //Check that the current state is actually allowed to write to
+    //the object state. Can be useful to debug the engine.
+    m_debugObjectStates = s2e()->getConfig()->getBool(getConfigKey() + ".debugObjectStates");
+
     //Start monitoring after the specified number of seconds
     bool hasTimeTrigger = false;
     m_timeTrigger = s2e()->getConfig()->getInt(getConfigKey() + ".timeTrigger", 0, &hasTimeTrigger);
@@ -151,6 +155,16 @@ void MemoryTracer::traceDataMemoryAccess(S2EExecutionState *state,
 
     if (m_traceHostAddresses) {
         e.flags |= EXECTRACE_MEM_HASHOSTADDR;
+        e.flags |= EXECTRACE_MEM_OBJECTSTATE;
+
+        klee::ObjectPair op = state->addressSpace.findObject(e.hostAddress & S2E_RAM_OBJECT_MASK);
+        e.concreteBuffer = 0;
+        if (op.first && op.second) {
+            e.concreteBuffer = (uint64_t) op.second->getConcreteStore();
+            if (isWrite && m_debugObjectStates) {
+                assert(state->addressSpace.isOwnedByUs(op.second));
+            }
+        }
     }
 
     if (!isAddrCste) {
@@ -166,8 +180,8 @@ void MemoryTracer::traceDataMemoryAccess(S2EExecutionState *state,
     }
 
     unsigned strucSize = sizeof(e);
-    if (!(e.flags & EXECTRACE_MEM_HASHOSTADDR)) {
-       strucSize -= sizeof(e.hostAddress);
+    if (!(e.flags & EXECTRACE_MEM_HASHOSTADDR) && !(e.flags & EXECTRACE_MEM_OBJECTSTATE)) {
+        strucSize -= (sizeof(e.hostAddress) + sizeof(e.concreteBuffer));
     }
 
     m_tracer->writeData(state, &e, sizeof(e), TRACE_MEMORY);
@@ -280,14 +294,9 @@ void MemoryTracer::onCustomInstruction(S2EExecutionState* state, uint64_t opcode
         return;
     }
 
-    //XXX: remove this mess. Should have a function for extracting
-    //info from opcodes.
-    opcode >>= 16;
-    uint8_t op = opcode & 0xFF;
-    opcode >>= 8;
+    uint64_t subfunction = OPCODE_GETSUBFUNCTION(opcode);
 
-
-    MemoryTracerOpcodes opc = (MemoryTracerOpcodes)op;
+    MemoryTracerOpcodes opc = (MemoryTracerOpcodes)subfunction;
     switch(opc) {
     case Enable:
         enableTracing();

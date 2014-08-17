@@ -67,6 +67,10 @@ struct BusInfo pci_bus_info = {
     }
 };
 
+#ifdef CONFIG_S2E
+static void pci_reset_mappings(PCIDevice *d);
+#endif
+
 static void pci_update_mappings(PCIDevice *d);
 static void pci_set_irq(void *opaque, int irq_num, int level);
 static int pci_add_option_rom(PCIDevice *pdev, bool is_default_rom);
@@ -344,6 +348,10 @@ static int get_pci_config_device(QEMUFile *f, void *pv, size_t size)
     config = g_malloc(size);
 
     qemu_get_buffer(f, config, size);
+
+#ifdef CONFIG_S2E
+    if (!s->rebuild_bars) {
+#endif
     for (i = 0; i < size; ++i) {
         if ((config[i] ^ s->config[i]) &
             s->cmask[i] & ~s->wmask[i] & ~s->w1cmask[i]) {
@@ -351,7 +359,31 @@ static int get_pci_config_device(QEMUFile *f, void *pv, size_t size)
             return -EINVAL;
         }
     }
+#ifdef CONFIG_S2E
+    }
+#endif
+
+
+#ifdef CONFIG_S2E
+    /**
+     * In S2E, symbolic devices can have different config spaces
+     * in different states. This includes different BAR layouts.
+     * We need to clean the previous mappings to make room for the new ones.
+     */
+    pci_reset_mappings(s);
+    if (s->rebuild_bars) {
+        pci_clear_mappings(s);
+    }
+#endif
+
     memcpy(s->config, config, size);
+
+#ifdef CONFIG_S2E
+    if (s->rebuild_bars) {
+        s->rebuild_bars(s);
+        memcpy(s->config, config, size);
+    }
+#endif
 
     pci_update_mappings(s);
 
@@ -372,6 +404,40 @@ static VMStateInfo vmstate_info_pci_config = {
     .get  = get_pci_config_device,
     .put  = put_pci_config_device,
 };
+
+
+/* Saving / restoring masks */
+#define DECLARE_PCI_MASK_GET(mask) \
+static int get_pci_config_ ## mask ## _device(QEMUFile *f, void *pv, size_t size) \
+{ \
+    uint8_t **v = pv; \
+    PCIDevice *s = container_of(pv, PCIDevice, mask); \
+    assert(size == pci_config_size(s)); \
+    qemu_get_buffer(f, *v, size); \
+    return 0; \
+}
+
+#define DECLARE_PCI_MASK_PUT(mask) \
+static void put_pci_config_## mask ##_device(QEMUFile *f, void *pv, size_t size) \
+{ \
+    const uint8_t **v = pv; \
+    assert(size == pci_config_size(container_of(pv, PCIDevice, mask))); \
+    qemu_put_buffer(f, *v, size); \
+}
+
+#define DECLARE_PCI_MASK_VMTATE(mask) \
+DECLARE_PCI_MASK_GET(mask) \
+DECLARE_PCI_MASK_PUT(mask) \
+static VMStateInfo vmstate_info_pci_ ## mask = { \
+    .name = "pci config mask", \
+    .get  = get_pci_config_ ## mask ## _device, \
+    .put  = put_pci_config_ ## mask ## _device, \
+};
+
+DECLARE_PCI_MASK_VMTATE(cmask)
+DECLARE_PCI_MASK_VMTATE(wmask)
+DECLARE_PCI_MASK_VMTATE(w1cmask)
+DECLARE_PCI_MASK_VMTATE(used)
 
 static int get_pci_irq_state(QEMUFile *f, void *pv, size_t size)
 {
@@ -417,9 +483,27 @@ const VMStateDescription vmstate_pci_device = {
     .minimum_version_id_old = 1,
     .fields      = (VMStateField []) {
         VMSTATE_INT32_LE(version_id, PCIDevice),
+        VMSTATE_BOOL(enabled, PCIDevice),
+        VMSTATE_BUFFER_UNSAFE_INFO(cmask, PCIDevice, 0,
+                                   vmstate_info_pci_cmask,
+                                   PCI_CONFIG_SPACE_SIZE),
+
+        VMSTATE_BUFFER_UNSAFE_INFO(wmask, PCIDevice, 0,
+                                   vmstate_info_pci_wmask,
+                                   PCI_CONFIG_SPACE_SIZE),
+
+        VMSTATE_BUFFER_UNSAFE_INFO(w1cmask, PCIDevice, 0,
+                                   vmstate_info_pci_w1cmask,
+                                   PCI_CONFIG_SPACE_SIZE),
+
+        VMSTATE_BUFFER_UNSAFE_INFO(used, PCIDevice, 0,
+                                   vmstate_info_pci_used,
+                                   PCI_CONFIG_SPACE_SIZE),
+
         VMSTATE_BUFFER_UNSAFE_INFO(config, PCIDevice, 0,
                                    vmstate_info_pci_config,
                                    PCI_CONFIG_SPACE_SIZE),
+
         VMSTATE_BUFFER_UNSAFE_INFO(irq_state, PCIDevice, 2,
 				   vmstate_info_pci_irq_state,
 				   PCI_NUM_PINS * sizeof(int32_t)),
@@ -434,9 +518,28 @@ const VMStateDescription vmstate_pcie_device = {
     .minimum_version_id_old = 1,
     .fields      = (VMStateField []) {
         VMSTATE_INT32_LE(version_id, PCIDevice),
+        VMSTATE_BOOL(enabled, PCIDevice),
+
+        VMSTATE_BUFFER_UNSAFE_INFO(cmask, PCIDevice, 0,
+                                   vmstate_info_pci_cmask,
+                                   PCIE_CONFIG_SPACE_SIZE),
+
+        VMSTATE_BUFFER_UNSAFE_INFO(wmask, PCIDevice, 0,
+                                   vmstate_info_pci_wmask,
+                                   PCIE_CONFIG_SPACE_SIZE),
+
+        VMSTATE_BUFFER_UNSAFE_INFO(w1cmask, PCIDevice, 0,
+                                   vmstate_info_pci_w1cmask,
+                                   PCIE_CONFIG_SPACE_SIZE),
+
+        VMSTATE_BUFFER_UNSAFE_INFO(used, PCIDevice, 0,
+                                   vmstate_info_pci_used,
+                                   PCIE_CONFIG_SPACE_SIZE),
+
         VMSTATE_BUFFER_UNSAFE_INFO(config, PCIDevice, 0,
                                    vmstate_info_pci_config,
                                    PCIE_CONFIG_SPACE_SIZE),
+
         VMSTATE_BUFFER_UNSAFE_INFO(irq_state, PCIDevice, 2,
 				   vmstate_info_pci_irq_state,
 				   PCI_NUM_PINS * sizeof(int32_t)),
@@ -963,11 +1066,53 @@ static pcibus_t pci_bar_address(PCIDevice *d,
     return new_addr;
 }
 
+#ifdef CONFIG_S2E
+static void pci_reset_mappings(PCIDevice *d)
+{
+    for(int i = 0; i < PCI_NUM_REGIONS; i++) {
+        PCIIORegion *r = &d->io_regions[i];
+
+        /* this region isn't registered */
+        if (!r->size)
+            continue;
+
+        /* reset the mapping */
+        if (r->addr != PCI_BAR_UNMAPPED) {
+            memory_region_del_subregion(r->address_space, r->memory);
+            pcibus_t old_addr = r->addr;
+            r->addr = PCI_BAR_UNMAPPED;
+
+            s2e_on_pci_device_update_mappings(d, i, old_addr);
+        }
+    }
+}
+
+void pci_clear_mappings(PCIDevice *d)
+{
+    for(int i = 0; i < PCI_NUM_REGIONS; i++) {
+        PCIIORegion *r = &d->io_regions[i];
+        r->addr = 0;
+        r->size = 0;
+        r->type = 0;
+        r->memory = NULL;
+        r->address_space = NULL;
+
+        uint32_t addr = pci_bar(d, i);
+        pci_set_long(d->config + addr, 0);
+        pci_set_long(d->wmask + addr, 0);
+        pci_set_long(d->cmask + addr, 0);
+    }
+}
+#endif
+
 static void pci_update_mappings(PCIDevice *d)
 {
     PCIIORegion *r;
     int i;
     pcibus_t new_addr;
+#ifdef CONFIG_S2E
+    pcibus_t old_addr;
+#endif
 
     for(i = 0; i < PCI_NUM_REGIONS; i++) {
         r = &d->io_regions[i];
@@ -986,16 +1131,21 @@ static void pci_update_mappings(PCIDevice *d)
         if (r->addr != PCI_BAR_UNMAPPED) {
             memory_region_del_subregion(r->address_space, r->memory);
         }
+
+#ifdef CONFIG_S2E
+        old_addr = r->addr;
+#endif
+
         r->addr = new_addr;
         if (r->addr != PCI_BAR_UNMAPPED) {
             memory_region_add_subregion_overlap(r->address_space,
                                                 r->addr, r->memory, 1);
         }
-    }
 
-#ifdef CONFIG_S2E
-    s2e_on_pci_device_update_mappings(d);
-#endif
+        #ifdef CONFIG_S2E
+        s2e_on_pci_device_update_mappings(d, i, old_addr);
+        #endif
+    }
 }
 
 static inline int pci_irq_disabled(PCIDevice *d)
@@ -1468,7 +1618,12 @@ PCIDevice *pci_find_device(PCIBus *bus, int bus_num, uint8_t devfn)
     if (!bus)
         return NULL;
 
-    return bus->devices[devfn];
+    PCIDevice *ret = bus->devices[devfn];
+    if (ret && !ret->enabled) {
+        ret = NULL;
+    }
+
+    return ret;
 }
 
 static int pci_qdev_init(DeviceState *qdev)
@@ -1495,6 +1650,10 @@ static int pci_qdev_init(DeviceState *qdev)
         do_pci_unregister_device(pci_dev);
         return -1;
     }
+
+    pci_dev->rebuild_bars = NULL;
+    pci_dev->enabled = true;
+
     if (pc->init) {
         rc = pc->init(pci_dev);
         if (rc != 0) {
@@ -1834,6 +1993,22 @@ uint8_t pci_find_capability(PCIDevice *pdev, uint8_t cap_id)
 {
     return pci_find_capability_list(pdev, cap_id, NULL);
 }
+
+#ifdef CONFIG_S2E
+void pci_device_enable(PCIDevice *dev, int enable)
+{
+    if (dev->enabled == enable) {
+        return;
+    }
+
+    dev->enabled = enable;
+    pci_reset_mappings(dev);
+    if (enable) {
+        pci_update_mappings(dev);
+    }
+}
+
+#endif
 
 static void pcibus_dev_print(Monitor *mon, DeviceState *dev, int indent)
 {

@@ -40,7 +40,7 @@ extern "C" {
 #include "qmp-commands.h"
 #include "monitor.h"
 
-extern struct CPUX86State *env;
+extern CPUArchState *env;
 }
 
 #include "CorePlugin.h"
@@ -152,7 +152,8 @@ static void s2e_tcg_instrument_code(S2E*, ExecutionSignal* signal, uint64_t pc, 
         TCGv_i32 tpc = tcg_temp_new_i32();
         TCGv_ptr cpu_env = MAKE_TCGV_PTR(0);
         tcg_gen_movi_i32(tpc, (tcg_target_ulong) nextpc);
-        tcg_gen_st_i32(tpc, cpu_env, offsetof(CPUX86State, eip));
+        tcg_gen_st_i32(tpc, cpu_env, CPU_OFFSET(PROG_COUNTER));
+
         tcg_temp_free_i32(tpc);
 #endif
     }
@@ -397,9 +398,9 @@ void s2e_on_device_activation(S2E *s2e, int bus_type, void *bus)
     s2e->getCorePlugin()->onDeviceActivation.emit(bus_type, bus);
 }
 
-void s2e_on_pci_device_update_mappings(void *pci_device)
+void s2e_on_pci_device_update_mappings(void *pci_device, int bar_index, uint64_t old_addr)
 {
-    g_s2e->getCorePlugin()->onPciDeviceMappingUpdate.emit(g_s2e_state, pci_device);
+    g_s2e->getCorePlugin()->onPciDeviceMappingUpdate.emit(g_s2e_state, pci_device, bar_index, old_addr);
 }
 
 void s2e_trace_port_access(

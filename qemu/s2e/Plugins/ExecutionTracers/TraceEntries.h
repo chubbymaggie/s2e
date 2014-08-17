@@ -71,6 +71,8 @@ enum ExecTraceEntryType {
     TRACE_TLBMISS,
     TRACE_ICOUNT,
     TRACE_MEM_CHECKER,
+    TRACE_EXCEPTION,
+    TRACE_STATE_SWITCH,
     TRACE_MAX
 };
 
@@ -298,6 +300,7 @@ struct ExecutionTraceTestCase {
 #define EXECTRACE_MEM_SYMBADDR 8
 #define EXECTRACE_MEM_HASHOSTADDR 16
 #define EXECTRACE_MEM_SYMBHOSTADDR 32
+#define EXECTRACE_MEM_OBJECTSTATE 64
 struct ExecutionTraceMemory
 {
     uint64_t pc;
@@ -308,6 +311,9 @@ struct ExecutionTraceMemory
 
     //The next field is written only if  EXECTRACE_MEM_HASHOST is set!
     uint64_t hostAddress;
+
+    //Only if EXECTRACE_MEM_OBJECTSTATE is set
+    uint64_t concreteBuffer;
 }__attribute__((packed));
 
 struct ExecutionTracePageFault
@@ -354,12 +360,41 @@ struct ExecutionTraceTb
          EDI=7
     };
 
+    enum ARMRegisters
+    {
+	R0=0,
+	R1=1,
+	R2=2,
+	R3=3,
+	R4=4,
+	R5=5,
+	R6=6,
+	R7=7,
+	R8=8,
+	R9=9,
+	R10=10,
+	R11=11,
+	R12=12,
+	R13=13,
+	R14=14,
+	R15=15
+    };
+
     uint64_t pc, targetPc;
     uint32_t size;
     uint8_t tbType;
 
     uint8_t symbMask;
     uint64_t registers[8];
+}__attribute__((packed));
+
+struct ExecutionTraceException {
+    uint64_t pc;
+    uint32_t vector;
+}__attribute__((packed));
+
+struct ExecutionTraceStateSwitch {
+    uint32_t newStateId;
 }__attribute__((packed));
 
 union ExecutionTraceAll {

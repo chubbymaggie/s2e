@@ -47,20 +47,28 @@ extern "C" {
 #include <sysemu.h>
 #include <cpus.h>
 
-extern struct CPUX86State *env;
+extern CPUArchState *env;
 void QEMU_NORETURN raise_exception(int exception_index);
 void QEMU_NORETURN raise_exception_err(int exception_index, int error_code);
 extern const uint8_t parity_table[256];
 extern const uint8_t rclw_table[32];
 extern const uint8_t rclb_table[32];
 
+
+
+
+#ifdef TARGET_ARM
+void do_interrupt(CPUArchState *env);
+void s2e_do_interrupt(void);
+#elif defined(TARGET_I386)
 void do_interrupt_all(int intno, int is_int, int error_code,
-                             target_ulong next_eip, int is_hw);
-
-
+                  target_ulong next_eip, int is_hw);
 void s2e_do_interrupt_all(int intno, int is_int, int error_code,
                              target_ulong next_eip, int is_hw);
+#endif
+
 uint64_t helper_set_cc_op_eflags(void);
+
 }
 
 #ifndef __APPLE__
@@ -442,11 +450,18 @@ void S2EExecutor::handlerTraceInstruction(klee::Executor* executor,
     S2EExecutionState* s2eState = static_cast<S2EExecutionState*>(state);
     g_s2e->getDebugStream()
             << "pc=" << hexval(s2eState->getPc())
+#ifdef TARGET_I386
             << " EAX: " << s2eState->readCpuRegister(offsetof(CPUX86State, regs[R_EAX]), klee::Expr::Int32)
             << " ECX: " << s2eState->readCpuRegister(offsetof(CPUX86State, regs[R_ECX]), klee::Expr::Int32)
             << " CCSRC: " << s2eState->readCpuRegister(offsetof(CPUX86State, cc_src), klee::Expr::Int32)
             << " CCDST: " << s2eState->readCpuRegister(offsetof(CPUX86State, cc_dst), klee::Expr::Int32)
-            << " CCOP: " << s2eState->readCpuRegister(offsetof(CPUX86State, cc_op), klee::Expr::Int32) << '\n';
+            << " CCOP: " << s2eState->readCpuRegister(offsetof(CPUX86State, cc_op), klee::Expr::Int32)
+#elif TARGET_ARM
+            // TODO
+#else
+#error "Target architecture not supported"
+#endif
+            << '\n';
 }
 
 void S2EExecutor::handlerOnTlbMiss(Executor* executor,
@@ -629,8 +644,6 @@ S2EExecutor::S2EExecutor(S2E* s2e, TCGLLVMContext *tcgLLVMContext,
     //__DEFINE_EXT_FUNCTION(raise_exception)
     //__DEFINE_EXT_FUNCTION(raise_exception_err)
 
-    helper_register_symbols();
-
     __DEFINE_EXT_VARIABLE(g_s2e_concretize_io_addresses)
     __DEFINE_EXT_VARIABLE(g_s2e_concretize_io_writes)
     __DEFINE_EXT_VARIABLE(g_s2e_fork_on_symbolic_address)
@@ -648,6 +661,14 @@ S2EExecutor::S2EExecutor(S2E* s2e, TCGLLVMContext *tcgLLVMContext,
     __DEFINE_EXT_VARIABLE(io_mem_notdirty)
 
     __DEFINE_EXT_FUNCTION(cpu_io_recompile)
+#ifdef TARGET_ARM
+    __DEFINE_EXT_FUNCTION(cpu_arm_handle_mmu_fault)
+    __DEFINE_EXT_FUNCTION(cpsr_read)
+    __DEFINE_EXT_FUNCTION(cpsr_write)
+    __DEFINE_EXT_FUNCTION(arm_cpu_list)
+//    __DEFINE_EXT_FUNCTION(do_interrupt)
+#endif
+#ifdef TARGET_I386
     __DEFINE_EXT_FUNCTION(cpu_x86_handle_mmu_fault)
     __DEFINE_EXT_FUNCTION(cpu_x86_update_cr0)
     __DEFINE_EXT_FUNCTION(cpu_x86_update_cr3)
@@ -658,6 +679,13 @@ S2EExecutor::S2EExecutor(S2E* s2e, TCGLLVMContext *tcgLLVMContext,
     __DEFINE_EXT_FUNCTION(cpu_get_apic_tpr)
     __DEFINE_EXT_FUNCTION(cpu_set_apic_tpr)
     __DEFINE_EXT_FUNCTION(cpu_smm_update)
+    __DEFINE_EXT_FUNCTION(hw_breakpoint_insert)
+    __DEFINE_EXT_FUNCTION(hw_breakpoint_remove)
+    __DEFINE_EXT_FUNCTION(check_hw_breakpoints)
+    __DEFINE_EXT_FUNCTION(cpu_get_tsc)
+    helper_register_symbols();
+#endif
+
     __DEFINE_EXT_FUNCTION(cpu_outb)
     __DEFINE_EXT_FUNCTION(cpu_outw)
     __DEFINE_EXT_FUNCTION(cpu_outl)
@@ -667,14 +695,10 @@ S2EExecutor::S2EExecutor(S2E* s2e, TCGLLVMContext *tcgLLVMContext,
     __DEFINE_EXT_FUNCTION(cpu_restore_state)
     __DEFINE_EXT_FUNCTION(cpu_abort)
     __DEFINE_EXT_FUNCTION(cpu_loop_exit)
-    __DEFINE_EXT_FUNCTION(cpu_get_tsc)
+
     __DEFINE_EXT_FUNCTION(tb_find_pc)
 
     __DEFINE_EXT_FUNCTION(qemu_system_reset_request)
-
-    __DEFINE_EXT_FUNCTION(hw_breakpoint_insert)
-    __DEFINE_EXT_FUNCTION(hw_breakpoint_remove)
-    __DEFINE_EXT_FUNCTION(check_hw_breakpoints)
 
     __DEFINE_EXT_FUNCTION(tlb_flush_page)
     __DEFINE_EXT_FUNCTION(tlb_flush)
@@ -780,7 +804,7 @@ S2EExecutor::S2EExecutor(S2E* s2e, TCGLLVMContext *tcgLLVMContext,
             PointerType::get(IntegerType::get(ctx, 64), 0);
     FunctionType* tbFunctionTy = FunctionType::get(
             IntegerType::get(ctx, TCG_TARGET_REG_BITS),
-            ArrayRef<Type*>(vector<Type*>(1, PointerType::get(
+            ArrayRef<llvm::Type*>(vector<llvm::Type*>(1, PointerType::get(
                     IntegerType::get(ctx, 64), 0))),
             false);
 
@@ -791,7 +815,7 @@ S2EExecutor::S2EExecutor(S2E* s2e, TCGLLVMContext *tcgLLVMContext,
     /* Create dummy main function containing just two instructions:
        a call to TB function and ret */
     Function* dummyMain = Function::Create(
-            FunctionType::get(Type::getVoidTy(ctx), false),
+            FunctionType::get(llvm::Type::getVoidTy(ctx), false),
             Function::PrivateLinkage, "s2e_dummyMainFunction",
             m_tcgLLVMContext->getModule());
 
@@ -812,9 +836,12 @@ S2EExecutor::S2EExecutor(S2E* s2e, TCGLLVMContext *tcgLLVMContext,
         assert(function);
         addSpecialFunctionHandler(function, handlerTraceMemoryAccess);
 
+// TODO: Find a way to bypass i/o access (when I/O adress is symbolic) for ARM
+#ifndef TARGET_ARM
         function = kmodule->module->getFunction("tcg_llvm_trace_port_access");
         assert(function);
         addSpecialFunctionHandler(function, handlerTracePortAccess);
+#endif
 
         function = kmodule->module->getFunction("s2e_on_tlb_miss");
         assert(function);
@@ -824,15 +851,19 @@ S2EExecutor::S2EExecutor(S2E* s2e, TCGLLVMContext *tcgLLVMContext,
         assert(function);
         addSpecialFunctionHandler(function, handleForkAndConcretize);
 
+// XXX: is this really not needed on ARM?
+#ifndef TARGET_ARM
         function = kmodule->module->getFunction("tcg_llvm_make_symbolic");
         assert(function);
         addSpecialFunctionHandler(function, handleMakeSymbolic);
+#endif
 
         function = kmodule->module->getFunction("tcg_llvm_get_value");
         assert(function);
         addSpecialFunctionHandler(function, handleGetValue);
 
-        FunctionType *traceInstTy = FunctionType::get(Type::getVoidTy(M->getContext()), false);
+
+        FunctionType *traceInstTy = FunctionType::get(llvm::Type::getVoidTy(M->getContext()), false);
         function = dynamic_cast<Function*>(kmodule->module->getOrInsertFunction("tcg_llvm_trace_instruction", traceInstTy));
         assert(function);
         addSpecialFunctionHandler(function, handlerTraceInstruction);
@@ -950,10 +981,11 @@ S2EExecutionState* S2EExecutor::createInitialState()
     __DEFINE_EXT_OBJECT_RO(cpu_single_env)
     __DEFINE_EXT_OBJECT_RO(loglevel)
     __DEFINE_EXT_OBJECT_RO(logfile)
+#ifdef TARGET_I386
     __DEFINE_EXT_OBJECT_RO_SYMB(parity_table)
     __DEFINE_EXT_OBJECT_RO_SYMB(rclw_table)
     __DEFINE_EXT_OBJECT_RO_SYMB(rclb_table)
-
+#endif
 
     m_s2e->getMessagesStream(state)
             << "Created initial state" << '\n';
@@ -987,7 +1019,7 @@ void S2EExecutor::initializeExecution(S2EExecutionState* state,
 }
 
 void S2EExecutor::registerCpu(S2EExecutionState *initialState,
-                              CPUX86State *cpuEnv)
+                              CPUArchState *cpuEnv)
 {
     std::cout << std::hex
             << "Adding CPU (addr = " << std::hex << cpuEnv
@@ -995,20 +1027,21 @@ void S2EExecutor::registerCpu(S2EExecutionState *initialState,
               << std::dec << '\n';
 
     /* Add registers and eflags area as a true symbolic area */
+
     initialState->m_cpuRegistersState =
-        addExternalObject(*initialState, cpuEnv,
-                      offsetof(CPUX86State, eip),
+        addExternalObject(*initialState, cpuEnv, CPU_CONC_LIMIT,
                       /* isReadOnly = */ false,
                       /* isUserSpecified = */ false,
                       /* isSharedConcrete = */ false);
+
 
     initialState->m_cpuRegistersState->setName("CpuRegistersState");
 
     /* Add the rest of the structure as concrete-only area */
     initialState->m_cpuSystemState =
         addExternalObject(*initialState,
-                      ((uint8_t*)cpuEnv) + offsetof(CPUX86State, eip),
-                      sizeof(CPUX86State) - offsetof(CPUX86State, eip),
+                      ((uint8_t*)cpuEnv) + CPU_CONC_LIMIT,
+                      sizeof(CPUArchState) - CPU_CONC_LIMIT,
                       /* isReadOnly = */ false,
                       /* isUserSpecified = */ true,
                       /* isSharedConcrete = */ true);
@@ -1028,6 +1061,7 @@ void S2EExecutor::registerCpu(S2EExecutionState *initialState,
         .getWriteable(initialState->m_cpuSystemState, cpuSystemObject);
 }
 
+
 void S2EExecutor::registerRam(S2EExecutionState *initialState,
                         uint64_t startAddress, uint64_t size,
                         uint64_t hostAddress, bool isSharedConcrete,
@@ -1044,6 +1078,12 @@ void S2EExecutor::registerRam(S2EExecutionState *initialState,
               << ", size = " << hexval(size) << ", hostAddr = " << hexval(hostAddress)
               << ", isSharedConcrete=" << isSharedConcrete << ", name=" << name << ")\n";
 
+#ifdef DEBUG_TLB
+    qemu_log("ALLOCATE RAM of size=%"PRIu64"\n",size);
+    qemu_log("\t start address: %"PRIx64".\n", startAddress);
+    qemu_log("\t host_address: %"PRIx64".\n", hostAddress);
+#endif
+
     for(uint64_t addr = hostAddress; addr < hostAddress+size;
                  addr += S2E_RAM_OBJECT_SIZE) {
         std::stringstream ss;
@@ -1054,6 +1094,17 @@ void S2EExecutor::registerRam(S2EExecutionState *initialState,
                 *initialState, (void*) addr, S2E_RAM_OBJECT_SIZE, false,
                 /* isUserSpecified = */ true, isSharedConcrete,
                 isSharedConcrete && !saveOnContextSwitch && StateSharedMemory);
+
+#ifdef DEBUG_TLB
+        qemu_log("\t mo address: %"PRIx64".\n", mo);
+
+        //get concrete store just for debugging
+        ObjectPair op = initialState->addressSpace.findObject(addr);
+        ObjectState* wos =
+                initialState->addressSpace.getWriteable(op.first, op.second);
+
+        qemu_log("\t wos->concreteStore  address: %"PRIx64".\n", wos->getConcreteStore());
+#endif
 
         mo->setName(ss.str());
 
@@ -1301,6 +1352,17 @@ void S2EExecutor::doStateSwitch(S2EExecutionState* oldState,
         }
         */
 
+        foreach(MemoryObject* mo, m_saveOnContextSwitch) {
+            if(mo == cpuMo)
+                continue;
+
+            const ObjectState *oldOS = oldState->addressSpace.findObject(mo);
+            ObjectState *oldWOS = oldState->addressSpace.getWriteable(mo, oldOS);
+            uint8_t *oldStore = oldWOS->getConcreteStore();
+            assert(oldStore);
+            memcpy(oldStore, (uint8_t*) mo->address, mo->size);
+        }
+
         //copyInConcretes(*oldState);
         oldState->getDeviceState()->saveDeviceState();
         //oldState->m_qemuIcount = qemu_icount;
@@ -1311,6 +1373,9 @@ void S2EExecutor::doStateSwitch(S2EExecutionState* oldState,
 
         oldState->m_active = false;
     }
+
+    uint64_t totalCopied = 0;
+    uint64_t objectsCopied = 0;
 
     if(newState) {
         timers_state = *newState->m_timersState;
@@ -1324,6 +1389,19 @@ void S2EExecutor::doStateSwitch(S2EExecutionState* oldState,
 
         memcpy(&env->jmp_env, &jmp_env, sizeof(jmp_buf));
 
+        foreach(MemoryObject* mo, m_saveOnContextSwitch) {
+            if(mo == cpuMo)
+                continue;
+
+            const ObjectState *newOS = newState->addressSpace.findObject(mo);
+            const uint8_t *newStore = newOS->getConcreteStore();
+            assert(newStore);
+            memcpy((uint8_t*) mo->address, newStore, mo->size);
+
+            totalCopied += mo->size;
+            objectsCopied++;
+        }
+
         newState->m_active = true;
 
         //Devices may need to write to memory, which can be done
@@ -1333,30 +1411,6 @@ void S2EExecutor::doStateSwitch(S2EExecutionState* oldState,
         newState->getDeviceState()->restoreDeviceState();
     }
 
-    uint64_t totalCopied = 0;
-    uint64_t objectsCopied = 0;
-    foreach(MemoryObject* mo, m_saveOnContextSwitch) {
-        if(mo == cpuMo)
-            continue;
-
-        if(oldState) {
-            const ObjectState *oldOS = oldState->addressSpace.findObject(mo);
-            ObjectState *oldWOS = oldState->addressSpace.getWriteable(mo, oldOS);
-            uint8_t *oldStore = oldWOS->getConcreteStore();
-            assert(oldStore);
-            memcpy(oldStore, (uint8_t*) mo->address, mo->size);
-        }
-
-        if(newState) {
-            const ObjectState *newOS = newState->addressSpace.findObject(mo);
-            const uint8_t *newStore = newOS->getConcreteStore();
-            assert(newStore);
-            memcpy((uint8_t*) mo->address, newStore, mo->size);
-        }
-
-        totalCopied += mo->size;
-        objectsCopied++;
-    }
 
     cpu_enable_ticks();
 
@@ -1937,7 +1991,7 @@ klee::ref<klee::Expr> S2EExecutor::executeFunction(S2EExecutionState *state,
     }
 
     ref<Expr> resExpr(0);
-    if(function->getReturnType()->getTypeID() != Type::VoidTyID)
+    if(function->getReturnType()->getTypeID() != llvm::Type::VoidTyID)
         resExpr = getDestCell(*state, state->pc).value;
 
     //copyOutConcretes(*state);
@@ -2041,7 +2095,19 @@ void S2EExecutor::notifyBranch(ExecutionState &state)
     /* Checkpoint the device state before branching */
     qemu_aio_flush();
     bdrv_flush_all();
-    //s2eState->m_tlb.clearTlbOwnership();
+    s2eState->clearTlbOwnership();
+
+    /**
+     * These objects must be saved before the cpu state, because
+     * getWritable() may modify the TLB.
+     */
+    foreach(MemoryObject* mo, m_saveOnContextSwitch) {
+        const ObjectState *os = s2eState->addressSpace.findObject(mo);
+        ObjectState *wos = s2eState->addressSpace.getWriteable(mo, os);
+        uint8_t *store = wos->getConcreteStore();
+        assert(store);
+        memcpy(store, (uint8_t*) mo->address, mo->size);
+    }
 
     /* Save CPU state */
     const MemoryObject* cpuMo = s2eState->m_cpuSystemState;
@@ -2053,13 +2119,6 @@ void S2EExecutor::notifyBranch(ExecutionState &state)
     *s2eState->m_timersState = timers_state;
     cpu_enable_ticks();
 
-    foreach(MemoryObject* mo, m_saveOnContextSwitch) {
-        const ObjectState *os = s2eState->addressSpace.findObject(mo);
-        ObjectState *wos = s2eState->addressSpace.getWriteable(mo, os);
-        uint8_t *store = wos->getConcreteStore();
-        assert(store);
-        memcpy(store, (uint8_t*) mo->address, mo->size);
-    }
 }
 
 void S2EExecutor::branch(klee::ExecutionState &state,
@@ -2181,7 +2240,7 @@ void S2EExecutor::yieldState(ExecutionState &s)
     g_s2e->getDebugStream().flush();
 
     // Skip the opcode
-    state.writeCpuState(CPU_OFFSET(eip), state.getPc() + 10, CPU_REG_SIZE << 3);
+    state.writeCpuState(CPU_OFFSET(PROG_COUNTER), state.getPc() + S2E_OPCODE_SIZE, CPU_REG_SIZE << 3);
 
     // Stop current execution
     state.writeCpuState(CPU_OFFSET(exception_index), EXCP_S2E, 8*sizeof(int));
@@ -2195,7 +2254,8 @@ void S2EExecutor::terminateStateAtFork(S2EExecutionState &state)
 
 inline void S2EExecutor::setCCOpEflags(S2EExecutionState *state)
 {
-    uint32_t cc_op = 0;
+#ifdef TARGET_I386
+	uint32_t cc_op = 0;
 
     // Check wether any of cc_op, cc_src, cc_dst or cc_tmp are symbolic
     if((state->getSymbolicRegistersMask() & (0xf<<1)) || m_executeAlwaysKlee) {
@@ -2224,8 +2284,39 @@ inline void S2EExecutor::setCCOpEflags(S2EExecutionState *state)
             helper_set_cc_op_eflags();
         }
     }
+#elif defined(TARGET_ARM)
+    //not needed for ARM
+#endif
 }
 
+/* Note that each QEMU target have different handlers naming and signature:
+ * on ARM - do_interrupt()/s2e_do_interrupt() - 0 args
+ * on X86 - do_interrupt_all()/s2e_do_interrupt_all() - 5 args
+ */
+
+#ifdef TARGET_ARM
+inline void S2EExecutor::doInterrupt(S2EExecutionState *state)
+{
+    if(state->m_cpuRegistersObject->isAllConcrete() && !m_executeAlwaysKlee) {
+        if(!state->m_runningConcrete)
+            switchToConcrete(state);
+        //TimerStatIncrementer t(stats::concreteModeTime);
+        s2e_do_interrupt();
+    } else {
+        if(state->m_runningConcrete)
+            switchToSymbolic(state);
+        std::vector<klee::ref<klee::Expr> > args(0);
+        try {
+            TimerStatIncrementer t(stats::symbolicModeTime);
+            executeFunction(state, "s2e_do_interrupt", args);
+        } catch(s2e::CpuExitException&) {
+            updateStates(state);
+            s2e_longjmp(env->jmp_env, 1);
+        }
+    }
+
+}
+#elif defined(TARGET_I386)
 inline void S2EExecutor::doInterrupt(S2EExecutionState *state, int intno,
                                      int is_int, int error_code,
                                      uint64_t next_eip, int is_hw)
@@ -2253,6 +2344,7 @@ inline void S2EExecutor::doInterrupt(S2EExecutionState *state, int intno,
         }
     }
 }
+#endif
 
 void S2EExecutor::setupTimersHandler()
 {
@@ -2329,11 +2421,18 @@ void S2EExecutor::queueStateForMerge(S2EExecutionState *state)
     state->m_lastMergeICount = state->getTotalInstructionCount();
 
     target_ulong mergePoint = 0;
+#ifdef TARGET_ARM
+    if(!state->readCpuRegisterConcrete(CPU_OFFSET(regs[13]), &mergePoint, CPU_REG_SIZE)) {
+        m_s2e->getWarningsStream(state)
+                << "Warning: merge request for a state with symbolic SP" << "\n";
+    }
+#elif defined(TARGET_I386)
     if(!state->readCpuRegisterConcrete(CPU_OFFSET(regs[R_ESP]), &mergePoint,
                                                                CPU_REG_SIZE)) {
         m_s2e->getWarningsStream(state)
                 << "Warning: merge request for a state with symbolic ESP" << '\n';
     }
+#endif
     mergePoint = hash64(mergePoint);
     mergePoint = hash64(state->getPc(), mergePoint);
 
@@ -2369,7 +2468,7 @@ void s2e_initialize_execution(S2E *s2e, S2EExecutionState *initial_state,
 }
 
 void s2e_register_cpu(S2E *s2e, S2EExecutionState *initial_state,
-                      CPUX86State *cpu_env)
+                      CPUArchState *cpu_env)
 {
     s2e->getExecutor()->registerCpu(initial_state, cpu_env);
 }
@@ -2390,7 +2489,8 @@ void s2e_register_dirty_mask(S2E *s2e, S2EExecutionState *initial_state,
     s2e->getExecutor()->registerDirtyMask(initial_state, host_address, size);
 }
 
-uintptr_t s2e_qemu_tb_exec(struct CPUX86State* env1, struct TranslationBlock* tb)
+
+uintptr_t s2e_qemu_tb_exec(CPUArchState* env1, struct TranslationBlock* tb)
 {
     /*s2e->getDebugStream() << "icount=" << std::dec << s2e_get_executed_instructions()
             << " pc=0x" << std::hex << state->getPc() << std::dec
@@ -2417,7 +2517,7 @@ void s2e_qemu_cleanup_tb_exec()
     return g_s2e->getExecutor()->cleanupTranslationBlock(g_s2e_state);
 }
 
-void s2e_set_cc_op_eflags(struct CPUX86State *env1)
+void s2e_set_cc_op_eflags(CPUArchState *env1)
 {
     env = env1;
     g_s2e->getExecutor()->setCCOpEflags(g_s2e_state);
@@ -2429,18 +2529,28 @@ void s2e_set_cc_op_eflags(struct CPUX86State *env1)
  *  code performs internally, therefore, there must be a means for such
  *  plugins to enable/disable tracing upon exiting/entering
  *  the emulation code.
+ *  The interrupt-handling methods here below are target-specific,
+ *  signatures must match the ones in QEMU target.
  */
+
+#ifdef TARGET_ARM
+void do_interrupt(CPUArchState *env)
+{
+    g_s2e_state->setRunningExceptionEmulationCode(true);
+    g_s2e->getExecutor()->doInterrupt(g_s2e_state);
+    g_s2e_state->setRunningExceptionEmulationCode(false);
+}
+#elif defined(TARGET_I386)
 void do_interrupt_all(int intno, int is_int, int error_code,
                       target_ulong next_eip, int is_hw)
 {
     g_s2e_state->setRunningExceptionEmulationCode(true);
     s2e_on_exception(intno);
-
     g_s2e->getExecutor()->doInterrupt(g_s2e_state, intno, is_int, error_code,
                                     next_eip, is_hw);
-
     g_s2e_state->setRunningExceptionEmulationCode(false);
 }
+#endif
 
 /**
  *  Checks whether we are trying to access an I/O port that returns a symbolic value.
@@ -2459,7 +2569,7 @@ void s2e_ensure_symbolic(S2E *s2e, S2EExecutionState *state)
 }
 
 /** Tlb cache helpers */
-void s2e_update_tlb_entry(S2EExecutionState* state, CPUX86State* env,
+void s2e_update_tlb_entry(S2EExecutionState* state, CPUArchState* env,
                           int mmu_idx, uint64_t virtAddr, uint64_t hostAddr)
 {
 #ifdef S2E_ENABLE_S2E_TLB
