@@ -575,11 +575,12 @@ void S2EExecutor::handleForkAndConcretize(Executor* executor,
             //Will have to reexecute handleForkAndConcretize in the speculative state
             sp.second->pc = sp.second->prevPC;
         }
+        s2eExecutor->bindLocal(target, *state, concreteAddress);
+        s2eExecutor->notifyFork(*state, condition, sp);
     } else {
         state->addConstraint(condition);
+        s2eExecutor->bindLocal(target, *state, concreteAddress);
     }
-
-    s2eExecutor->bindLocal(target, *state, concreteAddress);
 }
 
 void S2EExecutor::handleMakeSymbolic(Executor* executor,
@@ -1409,6 +1410,20 @@ void S2EExecutor::doStateSwitch(S2EExecutionState* oldState,
         //XXX: assigning g_s2e_state here is ugly but is required for restoreDeviceState...
         g_s2e_state = newState;
         newState->getDeviceState()->restoreDeviceState();
+
+        /**
+         * Memory region layout may change in between state switches.
+         * We need to go through the iotlb and check that the entries there
+         * still match with the new layout. If not, we invalidate these
+         * entries.
+         * XXX: need to make sure that the state hasn't branched on the old
+         * entry, otherwise bad things could happen. For now, invalidation
+         * mostly occurs because VGA memory layout changes unpredictably, shifting
+         * MMIO regions further in the list. Normal RAM comes first, so it's not
+         * affected.
+         */
+        CPUArchState *cpu_state = env;
+        s2e_phys_section_check(cpu_state);
     }
 
 
@@ -1627,7 +1642,8 @@ inline bool S2EExecutor::executeInstructions(S2EExecutionState *state, unsigned 
             }
         }
     } catch (CpuExitException &) {
-        assert(addedStates.empty());
+        updateStates(state);
+        //assert(addedStates.empty());
         return true;
     }
 
@@ -1646,6 +1662,8 @@ bool S2EExecutor::finalizeTranslationBlockExec(S2EExecutionState *state)
         return false;
 
     state->m_needFinalizeTBExec = false;
+    state->m_forkAborted = false;
+
     assert(state->stack.size() != 1);
 
     assert(!state->m_runningConcrete);
@@ -1942,6 +1960,10 @@ void S2EExecutor::cleanupTranslationBlock(S2EExecutionState* state)
 {
     assert(state->m_active);
 
+    if (state->m_forkAborted) {
+        return;
+    }
+
     //g_s2e_exec_ret_addr = 0;
 
     while(state->stack.size() != 1)
@@ -2015,6 +2037,34 @@ void S2EExecutor::deleteState(klee::ExecutionState *state)
     m_deletedStates.push_back(static_cast<S2EExecutionState*>(state));
 }
 
+void S2EExecutor::notifyFork(ExecutionState &originalState, ref<Expr> &condition,
+                             Executor::StatePair &targets)
+{
+    if (targets.first == NULL || targets.second == NULL) {
+        return;
+    }
+
+    std::vector<S2EExecutionState*> newStates(2);
+    std::vector<ref<Expr> > newConditions(2);
+
+    S2EExecutionState *state = static_cast<S2EExecutionState*>(&originalState);
+    newStates[0] = static_cast<S2EExecutionState*>(targets.first);
+    newStates[1] = static_cast<S2EExecutionState*>(targets.second);
+
+    newConditions[0] = condition;
+    newConditions[1] = klee::NotExpr::create(condition);
+
+    try {
+        m_s2e->getCorePlugin()->onStateFork.emit(state, newStates, newConditions);
+    } catch (CpuExitException e) {
+        if (state->stack.size() != 1) {
+            state->m_needFinalizeTBExec = true;
+            state->m_forkAborted = true;
+        }
+        throw e;
+    }
+}
+
 void S2EExecutor::doStateFork(S2EExecutionState *originalState,
                  const vector<S2EExecutionState*>& newStates,
                  const vector<ref<Expr> >& newConditions)
@@ -2044,10 +2094,7 @@ void S2EExecutor::doStateFork(S2EExecutionState *originalState,
         foreach(const StackFrame& fr, originalState->stack) {
             m_s2e->getDebugStream() << fr.kf->function->getName().str() << '\n';
         }
-    }
-
-    m_s2e->getCorePlugin()->onStateFork.emit(originalState,
-                                             newStates, newConditions);
+    }   
 }
 
 S2EExecutor::StatePair S2EExecutor::fork(ExecutionState &current,
